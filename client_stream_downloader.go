@@ -244,9 +244,15 @@ func (d *clientStreamDownloader) downloadPlaylist(
 		ur = newUR
 	}
 
-	d.onDownloadStreamPlaylist(ur.String())
+	var finalURL *url.URL
+	var pl playlist.Playlist
+	err := d.withRetry(ctx, func() error {
+		d.onDownloadStreamPlaylist(ur.String())
 
-	finalURL, pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, ur)
+		var err error
+		finalURL, pl, err = downloadPlaylist(ctx, d.httpClient, d.onRequest, ur)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +303,7 @@ func (d *clientStreamDownloader) downloadPreloadHint(
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
+		return nil, clientStatusError{res.StatusCode}
 	}
 
 	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundPartSize})
@@ -343,7 +349,7 @@ func (d *clientStreamDownloader) downloadSegment(
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusPartialContent {
-		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
+		return nil, clientStatusError{res.StatusCode}
 	}
 
 	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundSegmentSize})
@@ -362,8 +368,7 @@ func (d *clientStreamDownloader) downloadNextSegment(
 	var segPos int
 
 	if d.curSegmentID == nil {
-		if (d.firstPlaylist.PlaylistType != nil &&
-			*d.firstPlaylist.PlaylistType == playlist.MediaPlaylistTypeVOD) || d.firstPlaylist.Endlist {
+		if d.isVOD() {
 			// VOD stream: start from the beginning
 			if len(pl.Segments) == 0 {
 				return nil, nil, fmt.Errorf("no segments found")
@@ -393,12 +398,22 @@ func (d *clientStreamDownloader) downloadNextSegment(
 
 	d.curSegmentID = new(pl.MediaSequence + segPos)
 
-	byts, err := d.downloadSegment(ctx, seg.URI, seg.ByteRangeStart, seg.ByteRangeLength)
+	var byts []byte
+	err := d.withRetry(ctx, func() error {
+		var err error
+		byts, err = d.downloadSegment(ctx, seg.URI, seg.ByteRangeStart, seg.ByteRangeLength)
+		return err
+	})
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return seg, byts, nil
+}
+
+func (d *clientStreamDownloader) isVOD() bool {
+	return (d.firstPlaylist.PlaylistType != nil &&
+		*d.firstPlaylist.PlaylistType == playlist.MediaPlaylistTypeVOD) || d.firstPlaylist.Endlist
 }
 
 func (d *clientStreamDownloader) setTracks(ctx context.Context, tracks []*Track) ([]*clientTrack, bool) {
